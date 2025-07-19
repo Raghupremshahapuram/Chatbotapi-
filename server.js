@@ -33,8 +33,6 @@ const openai = new OpenAI({
     'X-Title': 'Local Booking Assistant',
   },
 });
-
-// ✅ Chatbot Route
 app.post('/chatbot', async (req, res) => {
   const { messages } = req.body;
 
@@ -46,18 +44,31 @@ app.post('/chatbot', async (req, res) => {
     const systemMessage = {
       role: 'system',
       content: `
-        You are a helpful movie booking assistant. Ask step-by-step: movie name, date, time, and number of seats.
-        Once all details are collected, respond with:
-        1. A friendly confirmation message.
-        2. Plain JSON (not in a code block) like this:
-        {
-          "movie_name": "Movie Name",
-          "date": "today",
-          "time": "10 PM",
-          "seats": 2
-        }
-        Avoid any markdown or \`\`\`. Output JSON inline.
-      `.trim(),
+You are a smart assistant for a movie and event booking platform.
+
+You can:
+- Book movie tickets (needs: movie name, date, time, number of seats)
+- Show list of available movies
+- Show list of upcoming events
+- Show showtimes for a specific movie
+
+When booking, return:
+{
+  "movie_name": "Dasara",
+  "date": "today",
+  "time": "4 PM",
+  "seats": 2
+}
+
+When asked for listings or showtimes, return:
+{
+  "action": "list_movies" | "list_events" | "get_timings",
+  "movie_name": "RRR" (optional),
+  "date": "today" (optional)
+}
+
+Do not use code blocks or markdown. Output JSON inline.
+`.trim(),
     };
 
     const completion = await openai.chat.completions.create({
@@ -71,33 +82,55 @@ app.post('/chatbot', async (req, res) => {
 
     let reply = raw;
     let bookingIntent = null;
+    let action = null;
 
     const jsonMatch = raw.match(/{[\s\S]*?}/);
     if (jsonMatch) {
       try {
         const parsed = JSON.parse(jsonMatch[0]);
-        bookingIntent = {
-          movie_name: parsed.movie_name || parsed.movieName || '',
-          date: (parsed.date || '').toLowerCase(),
-          time: parsed.time || '',
-          seats: Number(parsed.seats) || 0,
-        };
+
+        // 🟦 Check for booking intent
+        if (parsed.movie_name && parsed.date && parsed.time && parsed.seats) {
+          bookingIntent = {
+            movie_name: parsed.movie_name,
+            date: parsed.date.toLowerCase(),
+            time: parsed.time,
+            seats: Number(parsed.seats),
+          };
+        }
+
+        // 🟦 Check for action (movie list / event list / showtimes)
+        else if (parsed.action) {
+          action = parsed;
+
+          // Handle action inline
+          if (action.action === 'list_movies') {
+            const result = await pool.query('SELECT name FROM latest_movies');
+            const movieNames = result.rows.map(m => `🎬 ${m.name}`).join('\n');
+            return res.json({ reply: `Here are the available movies:\n\n${movieNames}` });
+          }
+
+          if (action.action === 'list_events') {
+            const result = await pool.query('SELECT name, event_date FROM events ORDER BY event_date');
+            const events = result.rows.map(e => `🎭 ${e.name} on ${e.event_date.toISOString().split('T')[0]}`).join('\n');
+            return res.json({ reply: `Here are the upcoming events:\n\n${events}` });
+          }
+
+          // For `get_timings`, let frontend handle showing available time buttons
+        }
+
         reply = raw.replace(jsonMatch[0], '').trim();
       } catch (e) {
         console.warn('⚠️ JSON parsing failed:', e.message);
       }
     }
 
-    res.json({ reply, bookingIntent });
+    res.json({ reply, bookingIntent, action });
   } catch (err) {
     console.error('❌ Chatbot error:', err.message);
     res.status(500).json({ error: 'Chatbot service failed' });
   }
 });
-
-
-
-// --- GET Routes ---
 
 // Fetch all latest movies
 app.get('/latest-movies', async (req, res) => {
