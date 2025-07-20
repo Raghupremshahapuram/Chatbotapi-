@@ -74,7 +74,7 @@ Do not use code blocks or markdown. Output JSON inline.
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o',
       messages: [systemMessage, ...messages],
-      max_tokens: 500,
+      max_tokens: 600,
     });
 
     const raw = completion.choices?.[0]?.message?.content?.trim() || '';
