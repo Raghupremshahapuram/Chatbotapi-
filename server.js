@@ -2,7 +2,7 @@ require('dotenv').config();
 
 const express = require('express');
 const { Pool } = require('pg');
-const OpenAI = require('openai');
+const { GoogleGenerativeAI } = require('@google/generative-ai'); // ✅ Import Google
 const bodyParser = require('body-parser');
 const cors = require('cors');
 
@@ -23,28 +23,23 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// ✅ OpenRouter Chatbot Setup
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-  baseURL: 'https://openrouter.ai/api/v1',
-  defaultHeaders: {
-    // Optional: Remove if OpenRouter doesn't require referer
-    'HTTP-Referer': 'https://fbooking.netlify.app/',
-    'X-Title': 'Local Booking Assistant',
-  },
-});
+// ✅ Gemini AI Client Setup
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
 app.post('/chatbot', async (req, res) => {
   const { messages } = req.body;
 
-  if (!Array.isArray(messages)) {
+  if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'Invalid message format' });
   }
 
   try {
-    const systemMessage = {
+    const systemInstruction = {
       role: 'system',
-      content: `
-You are a smart assistant for a movie and event booking platform.
+      parts: [{
+        text: `
+You are a smart assistant for a movie and event booking platform. Your name is FBN.
 
 You can:
 - Book movie tickets (needs: movie name, date, time, number of seats)
@@ -52,7 +47,7 @@ You can:
 - Show list of upcoming events
 - Show showtimes for a specific movie
 
-When booking, return:
+When booking, return ONLY the JSON object:
 {
   "movie_name": "Dasara",
   "date": "today",
@@ -60,25 +55,34 @@ When booking, return:
   "seats": 2
 }
 
-When asked for listings or showtimes, return:
+When asked for listings or showtimes, return ONLY the JSON object:
 {
   "action": "list_movies" | "list_events" | "get_timings",
   "movie_name": "RRR" (optional),
   "date": "today" (optional)
 }
 
-Do not use code blocks or markdown. Output JSON inline.
-`.trim(),
+Do not use code blocks or markdown. Output JSON inline. If you have a conversational reply, put it BEFORE the JSON object.
+`.trim()
+      }],
     };
 
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages: [systemMessage, ...messages],
-      max_tokens: 250,
+    const model = genAI.getGenerativeModel({
+      model: 'gemini-1.5-flash-latest',
+      systemInstruction: systemInstruction,
     });
 
-    const raw = completion.choices?.[0]?.message?.content?.trim() || '';
-    console.log('🧠 Raw response from OpenAI:\n', raw);
+    const history = messages.slice(0, -1).map(msg => ({
+      role: msg.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: msg.content }],
+    }));
+
+    const latestMessage = messages[messages.length - 1].content;
+    const chat = model.startChat({ history });
+    const result = await chat.sendMessage(latestMessage);
+    const raw = result.response.text();
+
+    console.log('🧠 Raw response from Gemini:\n', raw);
 
     let reply = raw;
     let bookingIntent = null;
@@ -89,7 +93,7 @@ Do not use code blocks or markdown. Output JSON inline.
       try {
         const parsed = JSON.parse(jsonMatch[0]);
 
-        // 🟦 Check for booking intent
+        // ✅ FIXED: Check for booking intent
         if (parsed.movie_name && parsed.date && parsed.time && parsed.seats) {
           bookingIntent = {
             movie_name: parsed.movie_name,
@@ -98,27 +102,27 @@ Do not use code blocks or markdown. Output JSON inline.
             seats: Number(parsed.seats),
           };
         }
-
-        // 🟦 Check for action (movie list / event list / showtimes)
+        // ✅ FIXED: Check for action
         else if (parsed.action) {
           action = parsed;
 
-          // Handle action inline
+          // ✅ FIXED: Handle list_movies action
           if (action.action === 'list_movies') {
-            const result = await pool.query('SELECT name FROM latest_movies');
-            const movieNames = result.rows.map(m => `🎬 ${m.name}`).join('\n');
+            const dbResult = await pool.query('SELECT name FROM latest_movies');
+            const movieNames = dbResult.rows.map(m => `🎬 ${m.name}`).join('\n');
+            // We return directly here because no further AI processing is needed
             return res.json({ reply: `Here are the available movies:\n\n${movieNames}` });
           }
 
+          // ✅ FIXED: Handle list_events action
           if (action.action === 'list_events') {
-            const result = await pool.query('SELECT name, event_date FROM events ORDER BY event_date');
-            const events = result.rows.map(e => `🎭 ${e.name} on ${e.event_date.toISOString().split('T')[0]}`).join('\n');
+            const dbResult = await pool.query('SELECT name, event_date FROM events ORDER BY event_date');
+            const events = dbResult.rows.map(e => `🎭 ${e.name} on ${e.event_date.toISOString().split('T')[0]}`).join('\n');
+            // We return directly here
             return res.json({ reply: `Here are the upcoming events:\n\n${events}` });
           }
-
-          // For `get_timings`, let frontend handle showing available time buttons
         }
-
+        // This removes the JSON part from the friendly text reply
         reply = raw.replace(jsonMatch[0], '').trim();
       } catch (e) {
         console.warn('⚠️ JSON parsing failed:', e.message);
@@ -126,12 +130,12 @@ Do not use code blocks or markdown. Output JSON inline.
     }
 
     res.json({ reply, bookingIntent, action });
+
   } catch (err) {
     console.error('❌ Chatbot error:', err.message);
     res.status(500).json({ error: 'Chatbot service failed' });
   }
 });
-
 // Fetch all latest movies
 app.get('/latest-movies', async (req, res) => {
   try {
